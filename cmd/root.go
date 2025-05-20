@@ -18,8 +18,9 @@ import (
 )
 
 var (
-	secretName string
-	namespace  string
+	namespace      string
+	labelSelector  = "reconcile.external-secrets.io/managed=true"
+	hashAnnotation = "reconcile.external-secrets.io/data-hash"
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -46,20 +47,36 @@ var rootCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// Get the secret
-		secret, err := clientset.CoreV1().Secrets(namespace).Get(context.Background(), secretName, metav1.GetOptions{})
-		if err != nil {
-			fmt.Printf("Error getting secret %s in namespace %s: %v\n", secretName, namespace, err)
-			os.Exit(1)
+		// List all secrets
+		secrets, err := clientset.CoreV1().Secrets(namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
+
+		for _, secret := range secrets.Items {
+			// Only update secrets having the hash annotation set
+			currentHash, ok := secret.Annotations[hashAnnotation]
+			if !ok {
+				fmt.Printf("%s/%s doesn't have the hash annotation, skipping..\n", secret.Namespace, secret.Name)
+				continue
+			}
+
+			// Calculate the new hash
+			newHash := utils.ObjectHash(secret.Data)
+
+			// Skip if hash is up-to-date
+			if currentHash == newHash {
+				fmt.Printf("%s/%s hash is up-to-date, skipping..\n", secret.Namespace, secret.Name)
+				continue
+			}
+
+			// Update the hash
+			secret.Annotations[hashAnnotation] = newHash
+			_, err := clientset.CoreV1().Secrets(secret.Namespace).Update(context.TODO(), &secret, metav1.UpdateOptions{})
+			if err != nil {
+				fmt.Printf("Error updating secret %s/%s: %v\n", secret.Namespace, secret.Name, err)
+				continue
+			}
+
+			fmt.Printf("Updated secret %s/%s\n", secret.Namespace, secret.Name)
 		}
-
-		// Calculate the hash
-		hash := utils.ObjectHash(secret.Data)
-
-		fmt.Printf("Secret: %s\n", secretName)
-		fmt.Printf("Namespace: %s\n", namespace)
-		fmt.Printf("ObjectHash: %s\n", hash)
-
 	},
 }
 
@@ -73,6 +90,5 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.Flags().StringVarP(&secretName, "secret", "s", "", "Name of the Kubernetes secret to hash (required)")
-	rootCmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "Namespace of the Kubernetes secret")
+	rootCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace of secrets to update (empty for all namespaces)")
 }
